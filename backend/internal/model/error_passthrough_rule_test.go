@@ -21,5 +21,9 @@ func TestAllPlatformsIncludesEveryConcretePlatform(t *testing.T) {
 		"typesafe",
 		"command_code",
 		"cline",
+		"codebuddy",
+		"qoder",
+		"trae",
+		"lobsterai",
 	}, AllPlatforms())
 }

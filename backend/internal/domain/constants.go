@@ -37,7 +37,21 @@ const (
 	PlatformCommandCode = "command_code"
 	// PlatformCline 是 Cline API（多模型聚合，OpenAI 兼容 Chat Completions；按量积分计费，
 	// 另有 ClinePass 订阅）。
-	PlatformCline     = "cline"
+	PlatformCline = "cline"
+	// PlatformCodeBuddy 是腾讯 CodeBuddy / WorkBuddy（自有鉴权 + 自有线协议 +
+	// 客户端指纹防风控）。由 CodeBuddyGatewayService 处理，不走 OpenAI/Anthropic
+	// 网关——它的上游不是标准端点，而是带设备/会话指纹的私有 RPC。
+	PlatformCodeBuddy = "codebuddy"
+	// PlatformQoder 是 Qoder（qoder.com / qoder.cn）。推理端点不是公开的
+	// OpenAI 兼容接口，而是经 COSY 签名 + 自定义编码的私有 RPC，
+	// 由 QoderGatewayService 处理。
+	PlatformQoder = "qoder"
+	// PlatformTrae 是 Trae（trae.cn，字节跳动）。推理走私有 SOLO 协议 +
+	// 自定义事件流，由 TraeGatewayService 处理。
+	PlatformTrae = "trae"
+	// PlatformLobsterAI 是有道 LobsterAI（龙虾）。鉴权按官方开源客户端
+	// 1:1 还原（keyfrom 归因 + authCode 交换），推理走 OpenAI 兼容端点。
+	PlatformLobsterAI = "lobsterai"
 	PlatformComposite = "composite"
 )
 

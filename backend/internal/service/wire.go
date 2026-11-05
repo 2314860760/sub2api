@@ -9,7 +9,11 @@ import (
 	dbent "github.com/Wei-Shaw/sub2api/ent"
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/payment"
-	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
+		"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
+	cbUpstream "github.com/Wei-Shaw/sub2api/internal/pkg/codebuddy/upstream"
+	cbQoder "github.com/Wei-Shaw/sub2api/internal/pkg/qoder"
+	cbTrae "github.com/Wei-Shaw/sub2api/internal/pkg/trae"
+	cbLobster "github.com/Wei-Shaw/sub2api/internal/pkg/lobsterai"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/xai"
@@ -367,6 +371,115 @@ func ProvideAntigravityTokenProvider(
 	p.SetRefreshPolicy(AntigravityProviderRefreshPolicy())
 	p.SetTempUnschedCache(tempUnschedCache)
 	return p
+}
+
+// ProvideCodeBuddyClient 构造移植进来的 CodeBuddy 上游客户端。
+//
+// 必须是**单例**：client 内部持有 TLS 指纹、连接池与并发刷新互斥，
+// 每处 new 一份会让指纹每次都重算、并把 refresh_token 的轮换保护拆成多份
+// （各持一把锁 = 没有锁）。
+func ProvideCodeBuddyClient() *cbUpstream.Client {
+	c := cbUpstream.New()
+	// 与面板默认值对齐：chat 走 ChatHTTP（Timeout=0，靠 header 超时与 idle 监控）。
+	c.HeaderTimeout = 120 * time.Second
+	c.IdleTimeout = 300 * time.Second
+	return c
+}
+
+// ProvideCodeBuddyTokenProvider creates the CodeBuddy token provider.
+func ProvideCodeBuddyTokenProvider(
+	accountRepo AccountRepository,
+	client *cbUpstream.Client,
+) *CodeBuddyTokenProvider {
+	return NewCodeBuddyTokenProvider(accountRepo, client)
+}
+
+// ProvideQoderClient 构造 Qoder 上游客户端（单例：持有连接池与排队策略）。
+func ProvideQoderClient() *cbQoder.Client {
+	c := cbQoder.New()
+	c.Queue = cbQoder.QueuePolicy{
+		MaxRetries: 3,
+		MaxWait:    60 * time.Second,
+	}
+	return c
+}
+
+// ProvideQoderTokenProvider 构造 Qoder 凭据续期器。
+func ProvideQoderTokenProvider(accountRepo AccountRepository) *QoderTokenProvider {
+	return NewQoderTokenProvider(accountRepo)
+}
+
+// ProvideQoderGatewayService 构造 Qoder 网关。
+//
+// 指纹盐取自配置；为空时退化为纯 uid 派生（与社区实现兼容），
+// 但生产应设置，否则同 uid 在不同部署产生相同指纹，易被上游关联。
+func ProvideQoderGatewayService(
+	accountRepo AccountRepository,
+	tokenProvider *QoderTokenProvider,
+	client *cbQoder.Client,
+	cfg *config.Config,
+) *QoderGatewayService {
+	salt := ""
+	if cfg != nil {
+		salt = cfg.Gateway.QoderFingerprintSalt
+	}
+	return NewQoderGatewayService(accountRepo, tokenProvider, client, salt)
+}
+
+// ProvideTraeClient 构造 Trae 上游客户端（单例：持有连接池）。
+func ProvideTraeClient() *cbTrae.Client { return cbTrae.New() }
+
+// ProvideTraeTokenProvider 构造 Trae 凭据续期器。
+func ProvideTraeTokenProvider(accountRepo AccountRepository) *TraeTokenProvider {
+	return NewTraeTokenProvider(accountRepo)
+}
+
+// ProvideTraeGatewayService 构造 Trae 网关。
+func ProvideTraeGatewayService(
+	accountRepo AccountRepository,
+	tokenProvider *TraeTokenProvider,
+	client *cbTrae.Client,
+	cfg *config.Config,
+) *TraeGatewayService {
+	salt := ""
+	if cfg != nil {
+		salt = cfg.Gateway.QoderFingerprintSalt
+	}
+	return NewTraeGatewayService(accountRepo, tokenProvider, client, salt)
+}
+
+// ProvideLobsterClient 构造 LobsterAI 鉴权客户端（单例）。
+func ProvideLobsterClient() *cbLobster.Client { return cbLobster.New() }
+
+// ProvideLobsterChatClient 构造 LobsterAI 推理客户端（单例：持有连接池）。
+func ProvideLobsterChatClient() *cbLobster.ChatClient { return cbLobster.NewChatClient() }
+
+// ProvideLobsterTokenProvider 构造 LobsterAI 凭据续期器。
+func ProvideLobsterTokenProvider(
+	accountRepo AccountRepository,
+	client *cbLobster.Client,
+	cfg *config.Config,
+) *LobsterTokenProvider {
+	v := ""
+	if cfg != nil {
+		v = cfg.Gateway.LobsterClientVersion
+	}
+	return NewLobsterTokenProvider(accountRepo, client, v)
+}
+
+// ProvideLobsterGatewayService 构造 LobsterAI 网关。
+func ProvideLobsterGatewayService(
+	accountRepo AccountRepository,
+	tokenProvider *LobsterTokenProvider,
+	chat *cbLobster.ChatClient,
+	client *cbLobster.Client,
+	cfg *config.Config,
+) *LobsterGatewayService {
+	v := ""
+	if cfg != nil {
+		v = cfg.Gateway.LobsterClientVersion
+	}
+	return NewLobsterGatewayService(accountRepo, tokenProvider, chat, client, v)
 }
 
 // ProvideGrokTokenProvider creates GrokTokenProvider with OAuthRefreshAPI injection.
@@ -907,6 +1020,19 @@ var ProviderSet = wire.NewSet(
 	ProvideGeminiTokenProvider,
 	NewGeminiMessagesCompatService,
 	ProvideAntigravityTokenProvider,
+	ProvideCodeBuddyClient,
+	ProvideCodeBuddyTokenProvider,
+	NewCodeBuddyGatewayService,
+	ProvideQoderClient,
+	ProvideQoderTokenProvider,
+	ProvideQoderGatewayService,
+	ProvideTraeClient,
+	ProvideTraeTokenProvider,
+	ProvideTraeGatewayService,
+	ProvideLobsterClient,
+	ProvideLobsterChatClient,
+	ProvideLobsterTokenProvider,
+	ProvideLobsterGatewayService,
 	ProvideGrokTokenProvider,
 	ProvideOpenAITokenProvider,
 	ProvideOpenAIQuotaService,

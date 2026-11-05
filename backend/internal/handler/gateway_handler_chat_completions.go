@@ -313,6 +313,46 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 			}
 			setActualUpstreamEndpoint(c, EndpointAntigravityGenerateContent)
 			result, err = h.antigravityGatewayService.ForwardAsChatCompletions(c.Request.Context(), c, account, forwardBody, parsedReq)
+		} else if shouldUseCodeBuddyCompat(account) {
+			if h.codebuddyGatewayService == nil {
+				h.chatCompletionsErrorResponse(c, http.StatusBadGateway, "upstream_error", "CodeBuddy gateway service is not configured")
+				if accountReleaseFunc != nil {
+					accountReleaseFunc()
+				}
+				return
+			}
+			setActualUpstreamEndpoint(c, EndpointCodeBuddyChatCompletions)
+			result, err = h.codebuddyGatewayService.ForwardAsChatCompletions(c.Request.Context(), c, account, forwardBody)
+		} else if shouldUseQoderCompat(account) {
+			if h.qoderGatewayService == nil {
+				h.chatCompletionsErrorResponse(c, http.StatusBadGateway, "upstream_error", "Qoder gateway service is not configured")
+				if accountReleaseFunc != nil {
+					accountReleaseFunc()
+				}
+				return
+			}
+			setActualUpstreamEndpoint(c, EndpointQoderInfer)
+			result, err = h.qoderGatewayService.ForwardAsChatCompletions(c.Request.Context(), c, account, forwardBody)
+		} else if shouldUseTraeCompat(account) {
+			if h.traeGatewayService == nil {
+				h.chatCompletionsErrorResponse(c, http.StatusBadGateway, "upstream_error", "Trae gateway service is not configured")
+				if accountReleaseFunc != nil {
+					accountReleaseFunc()
+				}
+				return
+			}
+			setActualUpstreamEndpoint(c, EndpointTraeChat)
+			result, err = h.traeGatewayService.ForwardAsChatCompletions(c.Request.Context(), c, account, forwardBody)
+		} else if shouldUseLobsterCompat(account) {
+			if h.lobsterGatewayService == nil {
+				h.chatCompletionsErrorResponse(c, http.StatusBadGateway, "upstream_error", "LobsterAI gateway service is not configured")
+				if accountReleaseFunc != nil {
+					accountReleaseFunc()
+				}
+				return
+			}
+			setActualUpstreamEndpoint(c, EndpointLobsterChat)
+			result, err = h.lobsterGatewayService.ForwardAsChatCompletions(c.Request.Context(), c, account, forwardBody)
 		} else {
 			result, err = h.gatewayService.ForwardAsChatCompletions(c.Request.Context(), c, account, forwardBody, parsedReq)
 		}

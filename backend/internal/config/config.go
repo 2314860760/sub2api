@@ -1164,6 +1164,14 @@ type GatewayConfig struct {
 	MaxSameAccountRetriesGemini int `mapstructure:"max_same_account_retries_gemini"`
 
 	// Antigravity 429 fallback 限流时间（分钟），解析重置时间失败时使用
+	// QoderFingerprintSalt 是 Qoder 设备指纹的部署私有盐。
+	// 为空则退化为纯 uid 派生；生产应设置，否则同 uid 在不同部署指纹相同。
+	// LobsterClientVersion 是 LobsterAI 客户端版本号，参与 keyfrom.version 与 UA。
+	// 留空则用内置兜底值；官方从 api-overmind 动态取，长期部署建议按期更新。
+	LobsterClientVersion string
+
+	QoderFingerprintSalt string
+
 	AntigravityFallbackCooldownMinutes int `mapstructure:"antigravity_fallback_cooldown_minutes"`
 
 	// Scheduling: 账号调度相关配置

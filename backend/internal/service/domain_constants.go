@@ -52,6 +52,10 @@ const (
 	PlatformTypeSafe    = domain.PlatformTypeSafe
 	PlatformCommandCode = domain.PlatformCommandCode
 	PlatformCline       = domain.PlatformCline
+	PlatformCodeBuddy   = domain.PlatformCodeBuddy
+	PlatformQoder       = domain.PlatformQoder
+	PlatformTrae        = domain.PlatformTrae
+	PlatformLobsterAI  = domain.PlatformLobsterAI
 	PlatformComposite   = domain.PlatformComposite
 	// PlatformKiro is retained for unsupported-platform threshold tests and legacy
 	// account rows. Scheduling-threshold evaluation never pauses kiro accounts.

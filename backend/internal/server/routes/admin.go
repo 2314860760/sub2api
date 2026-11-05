@@ -63,6 +63,9 @@ func RegisterAdminRoutes(
 		// Grok OAuth
 		registerGrokOAuthRoutes(admin, h)
 
+		// LobsterAI 登录（官方浏览器回调链路，start / poll 两步）
+		registerLobsterOAuthRoutes(admin, h)
+
 		// 国产供应商（kimi/zhipu/deepseek）额度与余额
 		registerCNProviderRoutes(admin, h)
 
@@ -487,6 +490,18 @@ func registerAntigravityOAuthRoutes(admin *gin.RouterGroup, h *handler.Handlers)
 		antigravity.POST("/oauth/auth-url", h.Admin.AntigravityOAuth.GenerateAuthURL)
 		antigravity.POST("/oauth/exchange-code", h.Admin.AntigravityOAuth.ExchangeCode)
 		antigravity.POST("/oauth/refresh-token", h.Admin.AntigravityOAuth.RefreshToken)
+	}
+}
+
+// registerLobsterOAuthRoutes 注册 LobsterAI 登录路由。
+//
+// 拆成 start/poll 两步是因为官方登录是「浏览器 OAuth + 本地回调」的交互流程，
+// 常驻服务不能阻塞等它。
+func registerLobsterOAuthRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
+	lobster := admin.Group("/lobsterai")
+	{
+		lobster.POST("/login/start", h.Admin.LobsterOAuth.StartLogin)
+		lobster.GET("/login/poll", h.Admin.LobsterOAuth.PollLogin)
 	}
 }
 

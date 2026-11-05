@@ -37,6 +37,20 @@ const (
 
 const EndpointAntigravityGenerateContent = "/v1internal:streamGenerateContent"
 
+// EndpointCodeBuddyChatCompletions 是 CodeBuddy 上游的实际出站路径。
+// 上游虽然走 OpenAI 形状，但端点是 /v2 前缀（不是 /v1），记录真实值才能在
+// 运维面板里一眼看出"这条请求打的是哪个上游"，而不是显示成客户端的入站路径。
+const EndpointCodeBuddyChatCompletions = "/v2/chat/completions"
+
+// EndpointQoderInfer 是 Qoder 的实际出站端点（COSY 签名的私有 RPC）。
+const EndpointQoderInfer = "/algo/api/v2/service/pro/sse/agent_chat_generation"
+
+// EndpointTraeChat 是 Trae 的实际出站端点（私有 SOLO 协议）。
+const EndpointTraeChat = "/api/agent/v3/llm_utils_chat"
+
+// EndpointLobsterChat 是 LobsterAI 的出站端点（OpenAI 兼容代理路径）。
+const EndpointLobsterChat = "/api/proxy/v1/chat/completions"
+
 // gin.Context keys used by the middleware and helpers below.
 const (
 	ctxKeyInboundEndpoint        = "_gateway_inbound_endpoint"
@@ -245,6 +259,16 @@ func DeriveUpstreamEndpoint(inbound, rawRequestPath, platform string) string {
 			return EndpointGeminiModels
 		}
 		return EndpointMessages
+	case service.PlatformCodeBuddy:
+		// 入站是 /v1/chat/completions，但上游实际端点是 /v2 前缀。
+		// 记录真实路径，运维面板才不会显示成客户端的入站路径。
+		return EndpointCodeBuddyChatCompletions
+	case service.PlatformQoder:
+		return EndpointQoderInfer
+	case service.PlatformTrae:
+		return EndpointTraeChat
+	case service.PlatformLobsterAI:
+		return EndpointLobsterChat
 	}
 
 	// Unknown platform — fall back to inbound.
@@ -361,4 +385,30 @@ func shouldUseAntigravityCompat(account *service.Account) bool {
 	return account != nil &&
 		account.Platform == service.PlatformAntigravity &&
 		account.Type == service.AccountTypeOAuth
+}
+
+// shouldUseCodeBuddyCompat 决定是否把请求交给 CodeBuddy 网关。
+//
+// 与 Antigravity 不同，这里**不限制账号类型**：CodeBuddy 的凭据是面板导出的
+// access_token/refresh_token（既非标准 oauth flow 也非纯 api key），落在 sub2api
+// 里最贴切的是 apikey 类型。若按 Antigravity 那样只认 OAuth，账号会被静默漏掉，
+// 表现是请求走了通用网关然后用错协议打上游——极难排查。
+func shouldUseCodeBuddyCompat(account *service.Account) bool {
+	return account != nil && account.Platform == service.PlatformCodeBuddy
+}
+
+// shouldUseQoderCompat 决定是否把请求交给 Qoder 网关。
+// 与 CodeBuddy 同理：不限制账号类型，凭据是导入的 token 而非标准 OAuth。
+func shouldUseQoderCompat(account *service.Account) bool {
+	return account != nil && account.Platform == service.PlatformQoder
+}
+
+// shouldUseTraeCompat 决定是否把请求交给 Trae 网关。
+func shouldUseTraeCompat(account *service.Account) bool {
+	return account != nil && account.Platform == service.PlatformTrae
+}
+
+// shouldUseLobsterCompat 决定是否把请求交给 LobsterAI 网关。
+func shouldUseLobsterCompat(account *service.Account) bool {
+	return account != nil && account.Platform == service.PlatformLobsterAI
 }

@@ -19,6 +19,14 @@ const (
 	PlatformGatewayGemini PlatformGateway = "gemini"
 	// PlatformGatewayAntigravity 由 Antigravity 网关处理。
 	PlatformGatewayAntigravity PlatformGateway = "antigravity"
+	// PlatformGatewayCodeBuddy 由 CodeBuddy 网关处理（自有鉴权与线协议）。
+	PlatformGatewayCodeBuddy PlatformGateway = "codebuddy"
+	// PlatformGatewayQoder 由 Qoder 网关处理（COSY 签名 + 私有推理端点）。
+	PlatformGatewayQoder PlatformGateway = "qoder"
+	// PlatformGatewayTrae 由 Trae 网关处理（SOLO 协议 + 自定义事件流）。
+	PlatformGatewayTrae PlatformGateway = "trae"
+	// PlatformGatewayLobsterAI 由 LobsterAI 网关处理（keyfrom 鉴权 + OpenAI 兼容推理）。
+	PlatformGatewayLobsterAI PlatformGateway = "lobsterai"
 )
 
 // PlatformSpec 描述一个具体（非 composite）平台。
@@ -48,6 +56,10 @@ var platformList = []PlatformSpec{
 	{ID: PlatformTypeSafe, DisplayName: "TypeSafe / Jev", Gateway: PlatformGatewayAnthropic, LiteLLMProvider: "typesafe"},
 	{ID: PlatformCommandCode, DisplayName: "Command Code", Gateway: PlatformGatewayOpenAI},
 	{ID: PlatformCline, DisplayName: "Cline", Gateway: PlatformGatewayOpenAI},
+	{ID: PlatformCodeBuddy, DisplayName: "CodeBuddy", Gateway: PlatformGatewayCodeBuddy},
+	{ID: PlatformQoder, DisplayName: "Qoder", Gateway: PlatformGatewayQoder},
+	{ID: PlatformTrae, DisplayName: "Trae", Gateway: PlatformGatewayTrae},
+	{ID: PlatformLobsterAI, DisplayName: "LobsterAI", Gateway: PlatformGatewayLobsterAI},
 }
 
 var platformIndex = func() map[string]int {
