@@ -1,0 +1,296 @@
+// transport.go 出站 Transport 构造的单一事实来源（连接层加固，吸收 kongjianguan
+// 4 连击实测经验的前三件，见 .claude/reports/fork-scan-absorb.md T-2）：
+// 真正禁 h2 / TLS 握手超时 / 短 keepalive 探测，全参数集中定义可测试可调整。
+// 第四件 DisableKeepAlives 按报告 trade-off 不吸收（每请求 TLS 握手开销与连接
+// 复用意图相反），分析见 .claude/reports/transport-hardening.md。
+package upstream
+
+import (
+	"context"
+	"crypto/tls"
+	"errors"
+	"fmt"
+	"net"
+	"net/http"
+	"time"
+
+	utls "github.com/refraction-networking/utls"
+)
+
+// 连接层参数集中定义（与 server/backoff.go 同风格：一处定义，测试可回读断言）。
+const (
+	// dialTimeout TCP 连接建立上限。半死连接的第一道闸：连不上就快速失败
+	// 轮转换号，不再干等系统 TCP 重传窗口（kongjianguan 实测半开 TCP 单次
+	// TTFB 卡 936s——默认 Dialer 无超时上限）。
+	dialTimeout = 10 * time.Second
+	// dialKeepAlive TCP keepalive 探测周期。默认 Dialer 2h 才发首个探测——
+	// NAT 黑洞里 2h 足够连接半死且被复用。15s 周期让死连接在 15~30s 内被
+	// 内核掐掉（RST/ETIMEDOUT），复用侧立即感知而非卡到重传窗口。
+	dialKeepAlive = 15 * time.Second
+	// tlsHandshakeTimeout TLS 握手上限。现役此前完全缺失——握手挂起时无任何
+	// 层兜底（ResponseHeaderTimeout 只在请求写完后才计时），只能干等到
+	// HTTP.Client.Timeout(120s)。
+	tlsHandshakeTimeout = 10 * time.Second
+	// idleConnTimeout 空闲连接池保留时长。从 90s 收到 30s：WAF 风暴后上游
+	// NGI 常态性掐闲置连接，90s 池里的连接多半已死（kongjianguan 同款取值）；
+	// 复用侧仍有 15s keepalive 兜底识别。
+	idleConnTimeout = 30 * time.Second
+	// responseHeaderTimeout 聊天 SSE 首字节前（响应头）硬上限。从 120s 收到
+	// 60s：kongjianguan 笔记实录成功请求 TTFB 曾到 16s（慢模型冷启动），
+	// 60s ≈ 3.75× 观测最坏健康首包，留足慢冷启动余量；同时把半死连接场景的
+	// 单请求卡死从 2 分钟压到 1 分钟（MaxRotate 默认 3 次的最坏轮转从 6 分钟
+	// 压到 3 分钟）。不取 kongjianguan 的 20s：其 20s 是 DisableKeepAlives+
+	// timedConn 20s 写超时组合的取值，我们保留连接复用，须按自身慢冷启动
+	// 观测留余量。语义核对（任务书设计纪律）：ResponseHeaderTimeout 只计响应
+	// 头到达前的时长，头到达后 SSE 长流不受影响（流中空闲由 IdleTimeout 监控，
+	// 见 idle.go），不误杀长流——transport_test.go 有显式回归。
+	//
+	// 注意：本常量只是 newTransport 的构造默认，main.go 会按 config
+	// upstream.header_timeout_seconds 无条件覆盖。因此生产生效值 = config
+	// 解析值（未配置时 normalize 回落 timeout_seconds，默认 120），本 60s 仅作
+	// 「Config 未接线/测试裸用」时的安全网——与 config.example.json 的取值
+	// 对齐避免三处口径漂移（transport 60 / config 回落 120 / example 60）。
+	responseHeaderTimeout = 60 * time.Second
+)
+
+// maxIdleConns / maxIdleConnsPerHost 连接池容量（既有值，一并集中定义）。
+const (
+	maxIdleConns        = 100
+	maxIdleConnsPerHost = 20
+)
+
+// newDialer 构造出站拨号器（DialContext 的 Timeout/KeepAlive 参数集中于此，
+// 供测试回读断言）。
+func newDialer() *net.Dialer {
+	return &net.Dialer{
+		Timeout:   dialTimeout,
+		KeepAlive: dialKeepAlive,
+	}
+}
+
+// dnsDialTimeout 单台 DNS 服务器的查询建连上限（多台依次尝试，任一台通即可）。
+const dnsDialTimeout = 5 * time.Second
+
+// NewDNSDialer 构造使用指定 DNS 服务器的出站拨号器（空列表 = 系统解析器）。
+//
+// 为什么需要它：Android 没有 /etc/resolv.conf，Go 的解析器会退回 [::1]:53（或
+// 127.0.0.1:53），所有域名解析直接 connection refused；本地 DNS 被污染／劫持时同理。
+// 传真实 DNS（如 223.5.5.5 / 119.29.29.29）即绕开系统解析器本身。
+// 服务器串可带端口（"1.1.1.1:5353"），不带端口按 53 补——多台依次尝试，
+// 首台失败换下一台，全失败才返回最后一个错误。
+func NewDNSDialer(servers []string) *net.Dialer {
+	d := newDialer()
+	if len(servers) == 0 {
+		return d
+	}
+	d.Resolver = &net.Resolver{
+		// PreferGo 是必须的：cgo 解析器无视 Resolver.Dial，会继续走系统配置。
+		PreferGo: true,
+		Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			dd := net.Dialer{Timeout: dnsDialTimeout}
+			var lastErr error
+			for _, s := range servers {
+				addr := s
+				if _, _, err := net.SplitHostPort(addr); err != nil {
+					addr = net.JoinHostPort(s, "53")
+				}
+				c, err := dd.DialContext(ctx, network, addr)
+				if err == nil {
+					return c, nil
+				}
+				lastErr = err
+			}
+			if lastErr == nil {
+				lastErr = errors.New("dns: 未配置服务器")
+			}
+			return nil, lastErr
+		},
+	}
+	return d
+}
+
+// newTLSDialer 构造出站 TLS 拨号函数：TCP →（可选指纹复刻）TLS 握手 → 头序包装。
+//
+// 为什么必须接管整个 TLS 拨号（而不是只包 DialContext）：http.Transport 在
+// DialContext 之上自己完成 TLS 握手，写进 conn 的是**加密记录**，在那一层
+// 看不到也改不了请求头。只有 DialTLSContext 返回「已完成的 TLS conn」时，
+// 上层写入的才是明文 HTTP 字节，headOrderConn 才能重排。
+//
+// 同一位置也承担 ClientHello 指纹复刻：fp="node" 时用 uTLS 手搓官方
+// Node/OpenSSL 形态（见 tlsfingerprint.go），fp="go" 时走 crypto/tls 原生。
+// 两件事共用一个拨号钩子，互不干扰。
+//
+// 代价：设了 DialTLSContext 之后，Transport 的 TLSHandshakeTimeout 与
+// TLSClientConfig 都不再生效，握手超时与 ServerName 由本函数自行保证。
+//
+// cfg 为 nil 时用最小默认配置；测试注入 InsecureSkipVerify 用自签 httptest
+// 服务器验证整条链路（生产恒 nil）。
+func newTLSDialer(d *net.Dialer, cfg *tls.Config, fp string) func(context.Context, string, string) (net.Conn, error) {
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		raw, err := d.DialContext(ctx, network, addr)
+		if err != nil {
+			return nil, err
+		}
+		return tlsHandshake(ctx, raw, addr, cfg, fp)
+	}
+}
+
+// TLSOver 在已建好的原始连接上做与直连完全相同的 TLS 握手（同一指纹档位、同一请求头重排）。
+// 代理池用它包住经代理建立的隧道：Transport 一旦配了代理或自定义 DialContext，就不再
+// 调用直连的 DialTLSContext，经代理的流量会退回 Go 原生握手；SOCKS 时更糟，直连的
+// DialTLSContext 会绕过代理直接出网。raw 由调用方建立，握手失败时由本函数关闭。
+func (c *Client) TLSOver(ctx context.Context, raw net.Conn, addr string) (net.Conn, error) {
+	return tlsHandshake(ctx, raw, addr, nil, c.TLSFingerprint)
+}
+
+// tlsHandshake 在 raw 上按指纹档位握手，返回包了请求头重排的明文连接；失败时关闭 raw。
+func tlsHandshake(ctx context.Context, raw net.Conn, addr string, cfg *tls.Config, fp string) (net.Conn, error) {
+	insecure := cfg != nil && cfg.InsecureSkipVerify
+	// cfg.ServerName 允许调用方显式指定 SNI（测试把连接指到 127.0.0.1 但仍要发
+	// 真实域名的 SNI，否则 uTLS 对 IP 地址按 RFC 不发 SNI，抓到的 ClientHello
+	// 会少一个扩展、JA3/JA4 全跑偏）。生产 cfg 恒 nil，行为不受影响。
+	host, _, splitErr := net.SplitHostPort(addr)
+	if splitErr != nil {
+		host = addr
+	}
+	if cfg != nil && cfg.ServerName != "" {
+		host = cfg.ServerName
+	}
+	hctx, cancel := context.WithTimeout(ctx, tlsHandshakeTimeout)
+	defer cancel()
+
+	// 复刻路径：uTLS 手搓 ClientHello。ALPN 刻意留空——官方 Node 栈就是
+	// 不带 ALPN，这与 Transport 禁 h2 的口径一致（见 newTransport 注释）。
+	if useNodeFingerprint(fp) {
+		uc := utls.UClient(raw, &utls.Config{
+			ServerName:         host,
+			InsecureSkipVerify: insecure,
+			MinVersion:         tls.VersionTLS12,
+		}, utls.HelloCustom)
+		if perr := uc.ApplyPreset(officialHelloSpec()); perr != nil {
+			raw.Close()
+			return nil, fmt.Errorf("tls fingerprint preset: %w", perr)
+		}
+		if herr := uc.HandshakeContext(hctx); herr != nil {
+			raw.Close()
+			return nil, herr
+		}
+		return newHeadOrderConn(uc), nil
+	}
+
+	// 原生路径：crypto/tls。
+	var tc0 *tls.Config
+	if cfg != nil {
+		tc0 = cfg.Clone()
+	} else {
+		tc0 = &tls.Config{MinVersion: tls.VersionTLS12}
+	}
+	tc0.ServerName = host
+	tc0.NextProtos = nil
+	tc := tls.Client(raw, tc0)
+	if herr := tc.HandshakeContext(hctx); herr != nil {
+		raw.Close()
+		return nil, herr
+	}
+	return newHeadOrderConn(tc), nil
+}
+
+// SetDNSDialer 把拨号器挂到现役两个 http.Client 上（覆盖 DialContext 与
+// DialTLSContext 两条路；TLS 那条要重新生成闭包才能换掉底层 dialer）。
+// nil 或空列表时不动——系统解析器不变。
+func (c *Client) SetDNSDialer(d *net.Dialer) {
+	if d == nil || d.Resolver == nil {
+		return
+	}
+	c.dialer = d
+	c.rebuildTLSDialer()
+}
+
+// rebuildTLSDialer 用当前的 dialer + 指纹档位重建两个 client 的拨号闭包。
+//
+// SetDNSDialer 与 SetTLSFingerprint 都改同一个闭包的输入，所以统一走这里，
+// 避免两处各自拼参数导致其中一项静默失效（比如换了 DNS 却把指纹改回原生）。
+func (c *Client) rebuildTLSDialer() {
+	d := c.dialer
+	if d == nil {
+		d = newDialer()
+	}
+	for _, cl := range []*http.Client{c.HTTP, c.ChatHTTP} {
+		if cl == nil {
+			continue
+		}
+		if t, ok := cl.Transport.(*http.Transport); ok && t.DialTLSContext != nil {
+			t.DialContext = d.DialContext
+			t.DialTLSContext = newTLSDialer(d, nil, c.TLSFingerprint)
+		}
+	}
+}
+
+// SetTLSFingerprint 切换出站 ClientHello 指纹档位（"node" 复刻官方 / "go" 原生）。
+//
+// 做成运行期可切换而不是构造期固定：一旦线上出现「换了指纹反而握手失败」的
+// 情况，改一行配置就能回滚到原生形态，不必重新发版。
+func (c *Client) SetTLSFingerprint(fp string) error {
+	norm, err := validateTLSFingerprint(fp)
+	if err != nil {
+		return err
+	}
+	c.TLSFingerprint = norm
+	c.rebuildTLSDialer()
+	return nil
+}
+
+// newTransport 构造共享出站 Transport（HTTP 与 ChatHTTP 同一实例，连接池不重复）。
+// 分两层防半死连接：
+//   - TLS 层：空 TLSNextProto 真正禁 h2（kongjianguan 二次修正的实证：ForceAttemptHTTP2=false
+//     只对自定义 Dial 生效，默认 TLS 经 ALPN 仍协商出 h2，半死 h2 流复用表现为
+//     "http2: timeout awaiting response headers"——唯一正确写法是置空映射，让 ALPN
+//     完成后无 h2 协议可用，连接退回 HTTP/1.1）。
+//   - TCP 层：DialContext 10s 建连上限 + 15s keepalive 探测，半开连接在建立期
+//     和复用期都能被快速识别（见 dialTimeout/dialKeepAlive 注释）。
+func newTransport() *http.Transport {
+	dialer := newDialer()
+	return &http.Transport{
+		DialContext: dialer.DialContext,
+		// DialTLSContext 接管整条 TLS 拨号：返回已握手的 conn（包了 headOrderConn），
+		// 让上层写入的明文请求头能被重排成官方顺序。见 newTLSDialer 注释。
+		DialTLSContext: newTLSDialer(dialer, nil, TLSFingerprintNode),
+		// 空 TLSNextProto（非 nil）真正禁 h2：见函数注释。必须 make 而非 nil——
+		// nil 表示「让标准库注入默认 h2 映射」（kongjianguan 实测：设
+		// ForceAttemptHTTP2=false 后日志仍报 h2 timeout，正是这个陷阱）。
+		TLSNextProto:          make(map[string]func(authority string, c *tls.Conn) http.RoundTripper),
+		TLSHandshakeTimeout:   tlsHandshakeTimeout,
+		MaxIdleConns:          maxIdleConns,
+		MaxIdleConnsPerHost:   maxIdleConnsPerHost,
+		IdleConnTimeout:       idleConnTimeout,
+		ResponseHeaderTimeout: responseHeaderTimeout,
+	}
+}
+
+// closeIdler 实现该接口的 RoundTripper 支持清空空闲连接池（*http.Transport、
+// http2.Transport 等均满足；测试注入的自定义 RoundTripper 可选择性实现）。
+type closeIdler interface {
+	CloseIdleConnections()
+}
+
+// roundTripCloseIdle 在传输层请求失败后清掉 rt 所属 Transport 的空闲连接池
+// （kongjianguan 第 4 件：失败连接可能仍留在空闲池里，等 IdleConnTimeout 才
+// 过期，下一个请求会继续捡到它）。
+//
+// 挂载点（任务书「评估挂载点：错误分类处理处」的结论）：错误分类（Classify）
+// 只见业务信封——传输层失败根本没有 body 可分类（见 doJSON/ChatStreamContext
+// 对 read body 失败的处理：不进 Classify、不罚号）。这类失败的正确处理正是
+// 连接层的池清理，故挂在与 Do 并列的传输层出口（ChatStreamContext 的 Do 错误
+// 分支），而非 applyErrorPolicy。
+//
+// 关闭是 best-effort：rt 为 nil 或未实现 closeIdler（如测试注入的 rtFunc）时
+// 静默跳过。CloseIdleConnections 只关空闲连接，不影响在途请求；瞬时代价是
+// 下个请求多一次 TCP+TLS 握手，与半死连接被复用卡 60s 的风险完全不成比例。
+func roundTripCloseIdle(rt http.RoundTripper) {
+	if rt == nil {
+		return
+	}
+	if ci, ok := rt.(closeIdler); ok {
+		ci.CloseIdleConnections()
+	}
+}
