@@ -278,6 +278,30 @@
           }
         ]
       }
+    },
+    {
+      "id": "codebuddy",
+      "display_name": "CodeBuddy",
+      "gateway": "codebuddy",
+      "cn_provider": false
+    },
+    {
+      "id": "qoder",
+      "display_name": "Qoder",
+      "gateway": "qoder",
+      "cn_provider": false
+    },
+    {
+      "id": "trae",
+      "display_name": "Trae",
+      "gateway": "trae",
+      "cn_provider": false
+    },
+    {
+      "id": "lobsterai",
+      "display_name": "LobsterAI",
+      "gateway": "lobsterai",
+      "cn_provider": false
     }
   ],
   "composite_precedence": [
@@ -293,6 +317,10 @@
     "opencode_go",
     "typesafe",
     "command_code",
-    "cline"
+    "cline",
+    "codebuddy",
+    "qoder",
+    "trae",
+    "lobsterai"
   ]
 }
